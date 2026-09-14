@@ -185,6 +185,11 @@ skyseg.onnx
 *.ply
 outputs/
 
+# eval output. NOTE: results/vggt_baseline.csv was supplied from other hardware
+# and this repo cannot regenerate it; it survives only in git history
+# (git show 0fe8b34:results/vggt_baseline.csv) and in local working copies.
+results/
+
 # latex build (report/report.tex is tracked; its build products are not)
 *.aux
 *.out

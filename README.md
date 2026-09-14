@@ -30,7 +30,8 @@ Evaluation was since extended, at the same fixed `K=12`, to **21 TUM sequences
 (fr1+fr2+fr3, 20 scored)** and **7-Scenes (7 scenes)**. Those runs have no VGGT
 baseline — VGGT-1B does not fit in the 6 GB GPU used here — so they characterise
 DVLT in isolation and do **not** bear on the parity claim above.
-[`results/RESULTS.md`](results/RESULTS.md) is the authoritative table.
+The authoritative table is `RESULTS.md`, regenerated from `logs/` by
+`evals/collect_all_results.py`; eval output is gitignored, so build it locally.
 
 Loop-closure verification turns out to be decisive:
 
@@ -58,13 +59,11 @@ evals/eval_tum_backbone.sh    TUM ATE harness (records failures as NaN, not 0.0)
                               SEQ_SET=fr1|fr23|all, RESUME=1 to skip done sequences
 evals/eval_7scenes_backbone.sh  the same harness for 7-Scenes
 evals/summarize_results.py    consolidates one config's runs into a table
-evals/collect_all_results.py  regenerates results/RESULTS.md + all_metrics.csv
-                              from logs/ — numbers are never hardcoded
+evals/collect_all_results.py  regenerates RESULTS.md + all_metrics.csv under
+                              results/ from logs/ — numbers are never hardcoded,
+                              and the output is gitignored, not checked in
 evals/visualize_submaps.py    per-submap coloured reconstructions
 evals/dense_pass.sh           dense point clouds per sequence
-results/RESULTS.md            the authoritative ATE tables, with caveats
-results/all_metrics.csv       one tidy row per (experiment, sequence)
-results/vggt_baseline.csv     VGGT numbers — supplied, NOT produced by this repo
 plan.md                       the original research plan
 pyproject.toml, uv.lock       pinned environment (183 packages, torch 2.5.1+cu124)
 UPSTREAM_README.md            VGGT-SLAM's own README, kept for attribution
@@ -94,10 +93,10 @@ uv pip install pip           # torch.utils.collect_env shells out to `python -m 
 #    The other three are upstream trees, absent from the lock on purpose.
 #    Order matters: `uv sync` prunes anything not in the lock, so run it FIRST —
 #    re-running it later will silently uninstall these three again.
-./setup.sh                   # clones third_party/{salad,vggt}; sam3 and
-                             # perception_models are lazily imported behind --run_os
-uv pip install --no-deps -e ./dvlt \
-    -e ./third_party/salad -e ./third_party/vggt
+./setup.sh                   # clones third_party/{salad,vggt}, then installs
+                             # dvlt + both editable with --no-deps. Idempotent.
+                             # --with-os also fetches sam3 + perception_models,
+                             # which are lazily imported behind --run_os.
 
 # 4. SALAD weights — setup.sh does NOT fetch these, and the run dies without them
 curl -L -o ~/.cache/torch/hub/checkpoints/dino_salad.ckpt \
@@ -126,8 +125,8 @@ python evals/collect_all_results.py
 ## Open items
 
 1. VGGT baseline on the *same* hardware — the memory/throughput half of the
-   claim is currently unmeasured, not confirmed. `results/vggt_baseline.csv` was
-   supplied from other hardware.
+   claim is currently unmeasured, not confirmed. The baseline numbers were
+   supplied from other hardware and are not distributed with this repo.
 2. More sequences for significance. fr2/fr3 and 7-Scenes are now done; EuRoC is
    not. Repeated runs alone will not get there, as the variance is between
    sequences.
@@ -141,8 +140,7 @@ python evals/collect_all_results.py
 This repo **redistributes upstream VGGT-SLAM source** (it is a history-stripped
 fork), so upstream's BSD-2-Clause terms apply to that code and
 [`LICENSE`](LICENSE) is retained unmodified. Only `vggt_slam/dvlt_backbone.py`,
-`evals/*_backbone.sh`, `evals/collect_all_results.py` and `results/` are new
-work.
+`evals/*_backbone.sh` and `evals/collect_all_results.py` are new work.
 
 | component | licence |
 |---|---|

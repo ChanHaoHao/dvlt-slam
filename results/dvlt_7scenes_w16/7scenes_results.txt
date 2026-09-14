@@ -1,8 +1,0 @@
-Run,Dataset,RMSE
-1,chess,0.035951
-1,fire,0.031542
-1,heads,0.023604
-1,office,0.075471
-1,pumpkin,0.128807
-1,redkitchen,0.055348
-1,stairs,0.086277
