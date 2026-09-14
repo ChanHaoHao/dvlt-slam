@@ -1,0 +1,10 @@
+Run,Dataset,RMSE
+1,rgbd_dataset_freiburg1_360,0.088896
+1,rgbd_dataset_freiburg1_desk,0.025244
+1,rgbd_dataset_freiburg1_desk2,0.062306
+1,rgbd_dataset_freiburg1_floor,0.038776
+1,rgbd_dataset_freiburg1_plant,0.025399
+1,rgbd_dataset_freiburg1_room,0.136050
+1,rgbd_dataset_freiburg1_rpy,0.027214
+1,rgbd_dataset_freiburg1_teddy,0.063763
+1,rgbd_dataset_freiburg1_xyz,0.009751

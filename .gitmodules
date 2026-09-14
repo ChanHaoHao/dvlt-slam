@@ -1,0 +1,3 @@
+[submodule "dvlt"]
+	path = dvlt
+	url = https://github.com/nv-tlabs/dvlt.git
