@@ -162,7 +162,7 @@ def main():
         vis_imgs=args.vis_imgs,
     )
 
-    print("Initializing and loading VGGT model...")
+    print("Initializing and loading reconstruction backbone...")
 
     if args.run_os:
         from sam3.model_builder import build_sam3_image_model
@@ -188,7 +188,7 @@ def main():
     model.eval()
     model = model.to(torch.bfloat16)  # use half precision
     model = model.to(device)
-    print("All models loaded. Starting SLAM loop.")
+    print(f"All models loaded ({utils.backbone_name(model)} backbone). Starting SLAM loop.")
 
     # Register the viser object-query panel so the user can search for objects
     # live (and after capture) without using the terminal.

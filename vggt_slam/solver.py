@@ -12,7 +12,7 @@ from vggt.utils.geometry import closed_form_inverse_se3, unproject_depth_map_to_
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.load_fn import load_and_preprocess_images
 
-from vggt_slam.slam_utils import compute_image_embeddings, Accumulator
+from vggt_slam.slam_utils import compute_image_embeddings, Accumulator, backbone_name
 from vggt_slam.loop_closure import ImageRetrieval
 from vggt_slam.frame_overlap import FrameTracker
 from vggt_slam.map import GraphMap
@@ -57,9 +57,14 @@ class Solver:
         self.lc_thres = lc_thres
 
         self.temp_count = 0
-        self.vggt_timer = Accumulator()
+        self.backbone_timer = Accumulator()
         self.loop_closure_timer = Accumulator()
         self.clip_timer = Accumulator()
+
+    @property
+    def vggt_timer(self):
+        """Deprecated alias for ``backbone_timer``, kept for upstream scripts."""
+        return self.backbone_timer
 
     def set_point_cloud(self, points_in_world_frame, points_colors, name, point_size):
         if self.vis_voxel_size is not None:
@@ -300,7 +305,7 @@ class Solver:
     def run_predictions(self, image_names, model, max_loops, clip_model, clip_preprocess):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         t1 = time.time()
-        with self.vggt_timer:
+        with self.backbone_timer:
             images = load_and_preprocess_images(image_names).to(device)
         print(f"Loaded and preprocessed {len(image_names)} images in {time.time() - t1:.2f} seconds")
         print(f"Preprocessed images shape: {images.shape}")
@@ -333,9 +338,9 @@ class Solver:
 
         with torch.no_grad():
             t1 = time.time()
-            with self.vggt_timer:
+            with self.backbone_timer:
                 predictions = model(images)
-            print(f"VGGT model inference took {time.time() - t1:.2f} seconds")
+            print(f"{backbone_name(model)} model inference took {time.time() - t1:.2f} seconds")
 
         # Check for loop closures and add retrieval vectors from new submap to the database
         predictions_lc = None

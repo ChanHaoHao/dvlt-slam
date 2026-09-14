@@ -81,6 +81,10 @@ class DVLTBackbone:
     adapter stays drop-in.
     """
 
+    # Read by vggt_slam.slam_utils.backbone_name() so timing and progress logging
+    # name the backbone actually in use rather than a hardcoded "VGGT".
+    backbone_name = "DVLT"
+
     def __init__(
         self,
         checkpoint: str = "nvidia/dvlt",

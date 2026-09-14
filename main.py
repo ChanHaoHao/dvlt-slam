@@ -57,7 +57,7 @@ def main():
         vis_imgs=args.vis_imgs
     )
 
-    print("Initializing and loading VGGT model...")
+    print(f"Initializing and loading {args.backbone.upper()} model...")
 
 
     if args.run_os:
@@ -102,6 +102,9 @@ def main():
 
     model.eval()
     model = model.to(device)
+
+    # Single source of truth for every later log line that names the backbone.
+    backbone = utils.backbone_name(model)
 
     # Use the provided image folder path
     print(f"Loading images from {args.image_folder}...")
@@ -159,8 +162,8 @@ def main():
     average_fps = total_time / image_count
     print(image_count, "frames processed")
     print("Total time:", total_time)
-    print(f"Total time for VGGT calls: {solver.vggt_timer.total_time:.4f}s")
-    print("Average VGGT time per frame:", solver.vggt_timer.total_time / image_count)
+    print(f"Total time for {backbone} calls: {solver.backbone_timer.total_time:.4f}s")
+    print(f"Average {backbone} time per frame:", solver.backbone_timer.total_time / image_count)
     print("Average loop closure time per frame:", solver.loop_closure_timer.total_time / image_count)
     print("Average keyframe selection time per frame:", keyframe_time.total_time / image_count)
     print("Average backend time per frame:", backend_time.total_time / image_count)

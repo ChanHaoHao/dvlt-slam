@@ -201,6 +201,17 @@ def overlay_masks(image, masks):
 
     return image
 
+def backbone_name(model) -> str:
+    """Display name of whichever submap backbone is loaded.
+
+    Logging used to hardcode "VGGT", which misreports every run on the DVLT
+    default. A backbone opts in by setting a ``backbone_name`` class attribute;
+    upstream's VGGT cannot (it lives in third_party/), so fall back to the class
+    name, which already reads "VGGT". Any future backbone is correct for free.
+    """
+    return getattr(model, "backbone_name", type(model).__name__)
+
+
 class Accumulator:
     def __init__(self):
         self.total_time = 0
