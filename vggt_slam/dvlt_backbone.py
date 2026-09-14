@@ -35,8 +35,8 @@ VGGT-SLAM derives ``image_match_ratio`` from the q/k of one *specific* global
 attention layer (``aggregator.target_layer = 20`` of 24) and rejects a retrieved
 loop when the ratio is < 0.95. DVLT has no layer 20: it loops a single shared
 block K times, so the structural analogue of "layer 20" is "iteration k of K".
-Whether any iteration carries an equivalent signal is an open question (Phase 1,
-step 5 of plan.md), so this is a switch rather than a fixed choice:
+Whether any iteration carries an equivalent signal is an open question, so this
+is a switch rather than a fixed choice:
 
   "bypass"  — always report 1.0, i.e. accept every loop SALAD retrieval proposes.
               The geometric gate downstream still applies. Use this to get the
@@ -44,7 +44,7 @@ step 5 of plan.md), so this is a switch rather than a fixed choice:
               than stock VGGT-SLAM, so it is NOT a like-for-like comparison.
   "attn"    — hook the shared block's global attention at iteration
               ``lc_attn_step`` and run VGGT's own ``get_similarity`` on its q/k.
-              This is the instrument for answering step 5 empirically.
+              This is the instrument for answering that empirically.
 """
 
 from __future__ import annotations

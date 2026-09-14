@@ -72,7 +72,6 @@ evals/collect_all_results.py  regenerates RESULTS.md + all_metrics.csv under
                               and the output is gitignored, not checked in
 evals/visualize_submaps.py    per-submap coloured reconstructions
 evals/dense_pass.sh           dense point clouds per sequence
-plan.md                       the original research plan
 pyproject.toml, uv.lock       pinned environment (183 packages, torch 2.5.1+cu124)
 UPSTREAM_README.md            VGGT-SLAM's own README, kept for attribution
 ```
@@ -139,8 +138,10 @@ python evals/collect_all_results.py
    not. Repeated runs alone will not get there, as the variance is between
    sequences.
 3. Submap-size sweep on one machine. Current evidence suggests *smaller* submaps
-   help VGGT (0.0370 at w=16 vs 0.0533 at w=32), which cuts against the
-   "fewer seams" mechanism in `plan.md`.
+   help VGGT (0.0370 at w=16 vs 0.0533 at w=32), which cuts against this work's
+   original "fewer seams" hypothesis — that a cheaper backbone buys larger
+   submaps, and larger submaps mean fewer boundaries for drift to accumulate
+   across.
 4. Diagnose `freiburg1_360`, the one sequence driving the variance.
 
 ## Licences
