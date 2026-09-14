@@ -8,8 +8,16 @@ untouched upstream code, so this stays a clean backbone comparison.
 DVLT is the **default** backbone here (`--backbone vggt` still selects the
 original path, which is what produced the baseline column below).
 
-**Status:** Phase 1 (fixed-`K` drop-in) complete. Phase 2 (adaptive `K`) was
-attempted and did not work; it is deliberately not in this repo.
+
+<p align="center">
+  <img src="assets/office_loop_demo.gif" alt="office_loop reconstructed with the DVLT backbone" width="95%"/>
+</p>
+
+`office_loop` (the sample sequence in `office_loop.zip`) reconstructed with the
+default DVLT backbone on a 6 GB RTX 4050: 473 frames &rarr; 208 keyframes,
+13 submaps, one loop closure, 25.4 M points, 43 s wall clock. Camera frustums
+are coloured by submap. Produced from a single
+`python main.py --image_folder office_loop --log_results` run.
 
 ## Headline result
 
