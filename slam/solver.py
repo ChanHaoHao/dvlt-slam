@@ -64,7 +64,9 @@ class Solver:
         vis_imgs: bool = False,
         model=None,
         clip_model=None,
-        clip_preprocess=None):
+        clip_preprocess=None,
+        viewer: bool = True,
+        viewer_port: int = 8080):
 
         self.init_conf_threshold = init_conf_threshold
         self.vis_voxel_size = vis_voxel_size
@@ -76,7 +78,10 @@ class Solver:
         self.clip_model = clip_model
         self.clip_preprocess = clip_preprocess
 
-        self.viewer = Viewer()
+        # Keep the historical default for the standalone entry points, while
+        # allowing ROS/RViz-only runs to avoid binding an unnecessary Viser
+        # server.
+        self.viewer = Viewer(port=viewer_port) if viewer else None
 
         self.flow_tracker = FrameTracker()
         self.map = GraphMap()
@@ -118,6 +123,8 @@ class Solver:
         return self.backbone_timer
 
     def set_point_cloud(self, points_in_world_frame, points_colors, name, point_size):
+        if self.viewer is None:
+            return
         if self.vis_voxel_size is not None:
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(points_in_world_frame.astype(np.float64))
@@ -141,6 +148,8 @@ class Solver:
         self.set_point_cloud(points_in_world_frame, points_colors, name, 0.001)
 
     def set_submap_poses(self, submap):
+        if self.viewer is None:
+            return
         # Add the camera poses to the visualization.
         extrinsics = submap.get_all_poses_world(self.graph)
         images = submap.get_all_frames() if self.vis_imgs else None

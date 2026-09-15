@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+repo_dir="$script_dir"
+while [ "$repo_dir" != "/" ]; do
+    candidate="$repo_dir/.venv-ros/bin/python"
+    if [ -x "$candidate" ]; then
+        exec "$candidate" -m dvlt_slam_ros.image_folder_publisher "$@"
+    fi
+    repo_dir="$(dirname -- "$repo_dir")"
+done
+
+echo "dvlt_slam_ros: .venv-ros/bin/python was not found above $script_dir" >&2
+exit 1

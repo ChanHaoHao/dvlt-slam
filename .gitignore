@@ -136,7 +136,7 @@ celerybeat.pid
 
 # Environments
 .env
-.venv
+.venv*
 env/
 venv/
 ENV/
@@ -194,3 +194,8 @@ results/
 *.fdb_latexmk
 *.fls
 report/**/*.pdf
+
+# colcon build artifacts
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/

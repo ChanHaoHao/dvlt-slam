@@ -1,0 +1,96 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Map cloud1
+        - /Trajectory1
+      Splitter Ratio: 0.5
+    Width: 320
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Name: root
+  Global Options:
+    Background Color: 32; 32; 32
+    Fixed Frame: map
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 20
+      Color: 80; 80; 80
+      Reference Frame: map
+    # Latched TRANSIENT_LOCAL, so a late-joining RViz still gets the current map.
+    # A VOLATILE subscriber would connect but show nothing until the next submap.
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Map cloud
+      Enabled: true
+      Topic:
+        Value: /dvlt_slam/cloud
+        Depth: 1
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: RGB8
+      Position Transformer: XYZ
+      Decay Time: 0
+      Queue Size: 1
+    - Class: rviz_default_plugins/Path
+      Name: Trajectory
+      Enabled: true
+      Topic:
+        Value: /dvlt_slam/path
+        Depth: 1
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Color: 25; 255; 120
+      Line Style: Lines
+      Buffer Length: 1
+    - Class: rviz_default_plugins/Pose
+      Name: Current pose
+      Enabled: true
+      Topic:
+        Value: /dvlt_slam/pose
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Shape: Axes
+      Axes Length: 0.2
+      Axes Radius: 0.02
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+      Show Axes: true
+      Show Arrows: false
+      Marker Scale: 0.3
+      Frame Timeout: 15
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Distance: 6
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Pitch: 0.6
+      Yaw: 2.4
+      Near Clip Distance: 0.01
+Window Geometry:
+  Height: 900
+  Width: 1400
+  Displays:
+    collapsed: false
