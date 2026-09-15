@@ -205,11 +205,11 @@ def backbone_name(model) -> str:
     """Display name of whichever submap backbone is loaded.
 
     Logging used to hardcode "VGGT", which misreports every run on the DVLT
-    default. A backbone opts in by setting a ``backbone_name`` class attribute;
-    upstream's VGGT cannot (it lives in third_party/), so fall back to the class
-    name, which already reads "VGGT". Any future backbone is correct for free.
+    default. ``backbone_name`` is part of ``SubmapBackbone``, so every backbone
+    has one; the fallback this used to need went away when VGGT stopped being
+    used bare and got an adapter of its own.
     """
-    return getattr(model, "backbone_name", type(model).__name__)
+    return model.backbone_name
 
 
 class Accumulator:

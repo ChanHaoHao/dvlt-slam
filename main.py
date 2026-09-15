@@ -8,9 +8,9 @@ from torchvision.transforms.functional import to_pil_image
 from tqdm.auto import tqdm
 import cv2
 
-import vggt_slam.slam_utils as utils
-from vggt_slam.backbone import build_backbone
-from vggt_slam.solver import Solver
+import slam.slam_utils as utils
+from slam.backbones import build_backbone
+from slam.solver import Solver
 
 parser = argparse.ArgumentParser(description="SLAM demo (DVLT or VGGT backbone)")
 parser.add_argument("--image_folder", type=str, default="examples/kitchen/images/", help="Path to folder containing images")

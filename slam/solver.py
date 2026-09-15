@@ -11,20 +11,18 @@ import torch
 import time
 import open3d as o3d
 from termcolor import colored
-from scipy.linalg import rq
 
 from vggt.utils.geometry import closed_form_inverse_se3, unproject_depth_map_to_point_map
-from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.load_fn import load_and_preprocess_images
 
-from vggt_slam.slam_utils import compute_image_embeddings, Accumulator, backbone_name
-from vggt_slam.loop_closure import ImageRetrieval
-from vggt_slam.frame_overlap import FrameTracker
-from vggt_slam.map import GraphMap
-from vggt_slam.submap import Submap
-from vggt_slam.graph import PoseGraph
-from vggt_slam.scale_solver import estimate_scale_pairwise
-from vggt_slam.viewer import Viewer
+from slam.slam_utils import compute_image_embeddings, Accumulator, backbone_name
+from slam.loop_closure import ImageRetrieval
+from slam.frame_overlap import FrameTracker
+from slam.map import GraphMap
+from slam.submap import Submap
+from slam.graph import PoseGraph
+from slam.scale_solver import estimate_scale_pairwise
+from slam.viewer import Viewer
 
 DEBUG = False
 
@@ -41,7 +39,7 @@ class _SubmapWork:
     """
     image_names: list
     images: object
-    predictions: dict
+    reconstruction: object
     retrieval_vectors: object
     semantic_vectors: object
     model: object
@@ -111,6 +109,8 @@ class Solver:
         self._submaps_submitted = 0
         self._submaps_done = 0
         self._submaps_dropped = 0
+        self._on_submap = None
+        self._backend_active = False
 
     @property
     def vggt_timer(self):
@@ -253,18 +253,24 @@ class Solver:
                 print("Adding between factor: \n", submap_id_curr + index - 1, submap_id_curr + index, H_inner)
 
     def add_points(self, pred_dict):
-        """
+        """Fold one finished submap into the map and the pose graph.
+
         Args:
-            pred_dict (dict):
+            pred_dict (dict): what ``_finalize_submap`` returns -- numpy, no batch
+                dimension. The backbone geometry:
             {
-                "images": (S, 3, H, W)   - Input images,
-                "world_points": (S, H, W, 3),
-                "world_points_conf": (S, H, W),
+                "images": (S, 3, H, W),
                 "depth": (S, H, W, 1),
                 "depth_conf": (S, H, W),
                 "extrinsic": (S, 3, 4),
                 "intrinsic": (S, 3, 3),
+                "detected_loops": [LoopMatch],
             }
+                plus, only when a loop passed verification, the same geometry for
+                the 2 loop frames under "*_lc", and "frames_lc"/"frames_lc_names".
+
+            World points are not passed in; they are unprojected here from depth
+            and the camera matrices.
         """
         # Unpack prediction dict
         t1 = time.time()
@@ -389,13 +395,13 @@ class Solver:
         with torch.no_grad():
             t1 = time.time()
             with self.backbone_timer:
-                predictions = model(images)
+                reconstruction = model.reconstruct(images)
             print(f"{backbone_name(model)} model inference took {time.time() - t1:.2f} seconds")
 
         return _SubmapWork(
             image_names=list(image_names),
             images=images,
-            predictions=predictions,
+            reconstruction=reconstruction,
             retrieval_vectors=retrieval_vectors,
             semantic_vectors=semantic_vectors,
             model=model,
@@ -409,7 +415,7 @@ class Solver:
         model = work.model
         images = work.images
         image_names = work.image_names
-        predictions = work.predictions
+        recon = work.reconstruction
 
         # First submap so set new pcd num to 0
         if self.map.get_largest_key() is None:
@@ -432,7 +438,7 @@ class Solver:
         print(f"Created new submap in {time.time() - t1:.2f} seconds")
 
         # Check for loop closures and add retrieval vectors from new submap to the database
-        predictions_lc = None
+        verification = None
         with self.loop_closure_timer:
             detected_loops = self.image_retrieval.find_loop_closures(self.map, new_submap, max_loop_closures=max_loops, max_similarity_thres=self.lc_thres)
         loop_closure_frame_names = []
@@ -441,7 +447,7 @@ class Solver:
             retrieved_frames = self.map.get_frames_from_loops(detected_loops)
             with torch.no_grad():
                 lc_frames = torch.stack((new_submap.get_frame_at_index(detected_loops[0].query_submap_frame), retrieved_frames[0]), axis=0)
-                predictions_lc = model(lc_frames, compute_similarity=True)
+                verification = model.verify_loop(lc_frames)
                 loop_closure_frame_names = [new_submap.get_img_names_at_index(detected_loops[0].query_submap_frame), 
                 self.map.get_submap(detected_loops[0].detected_submap_id).get_img_names_at_index(detected_loops[0].detected_submap_frame)]
 
@@ -456,33 +462,40 @@ class Solver:
                 plt.title("Loop Closure Frames. Left: Query Frame, Right: Retrieved Frame")
                 plt.show()
 
-        print("Converting pose encoding to extrinsic and intrinsic matrices...")
-        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
-        predictions["extrinsic"] = extrinsic
-        predictions["intrinsic"] = intrinsic
-
-        predictions["detected_loops"] = detected_loops
+        # The solver's own working dict: the backbone's geometry plus everything
+        # this method derives. Distinct from what a backbone returns -- nothing
+        # below this line is a model output.
+        predictions = {
+            "images": images,
+            "extrinsic": recon.extrinsic,
+            "intrinsic": recon.intrinsic,
+            "depth": recon.depth,
+            "depth_conf": recon.depth_conf,
+            "detected_loops": detected_loops,
+        }
         
-        if predictions_lc is not None:
-            image_match_ratio = predictions_lc["image_match_ratio"]
-            if image_match_ratio < 0.95:
+        if verification is not None:
+            if verification.match_score < 0.95:
                 print(colored("Loop closure image match ratio too low, skipping loop closure", "red"))
-                predictions_lc = None # We set to None to ignore the loop closure
+                verification = None # We set to None to ignore the loop closure
                 predictions["detected_loops"] = []
             else:
                 self.graph.increment_loop_closure()
-                extrinsic_lc, intrinsic_lc = pose_encoding_to_extri_intri(predictions_lc["pose_enc"], retrieved_frames[0].shape[-2:])
-                predictions["extrinsic_lc"] = extrinsic_lc
-                predictions["intrinsic_lc"] = intrinsic_lc
-                predictions["depth_lc"] = predictions_lc["depth"]
-                predictions["depth_conf_lc"] = predictions_lc["depth_conf"]
+                lc = verification.reconstruction
+                predictions["extrinsic_lc"] = lc.extrinsic
+                predictions["intrinsic_lc"] = lc.intrinsic
+                predictions["depth_lc"] = lc.depth
+                predictions["depth_conf_lc"] = lc.depth_conf
 
             
-        for key in predictions.keys():
-            if isinstance(predictions[key], torch.Tensor) and key != "target_tokens":
-                predictions[key] = predictions[key].float().cpu().numpy().squeeze(0)  # remove batch dimension and convert to numpy
-    
-        if predictions_lc is not None:
+        # No squeeze(0) here any more: SubmapBackbone has no batch dimension, so
+        # these are already (S, ...). Squeezing would silently drop the frame axis
+        # of a single-frame submap.
+        for key, value in predictions.items():
+            if isinstance(value, torch.Tensor):
+                predictions[key] = value.float().cpu().numpy()
+
+        if verification is not None:
             predictions["frames_lc"] = lc_frames[0:2,...]
             print(loop_closure_frame_names)
             predictions["frames_lc_names"] = loop_closure_frame_names
@@ -559,6 +572,15 @@ class Solver:
         self._backend_thread.start()
         print(f"[Solver] Pipeline started (submap_size={submap_size}, overlap={overlapping_window_size}).")
 
+    def set_submap_callback(self, fn):
+        """Register fn(loop_closed: bool), called after each submap is merged.
+
+        Runs on the backend thread with map_lock released, so the callback may
+        take map_lock itself to read a consistent map. Lets a ROS node publish
+        on map change instead of polling.
+        """
+        self._on_submap = fn
+
     def track(self, image, timestamp: float = None):
         """Feed one frame. Returns the latest world pose, or None before the first submap.
 
@@ -622,6 +644,7 @@ class Solver:
             work = self._backend_q.get()
             if work is _SHUTDOWN:
                 return
+            self._backend_active = True
             try:
                 with self.map_lock:
                     predictions = self._finalize_submap(work, self._max_loops)
@@ -637,18 +660,39 @@ class Solver:
                             self.update_all_submap_vis()
                         else:
                             self.update_latest_submap_vis()
+                if self._on_submap is not None:
+                    try:
+                        self._on_submap(loop_closed)
+                    except Exception:
+                        import traceback
+                        print(colored("[Solver] submap callback raised:", "red"))
+                        traceback.print_exc()
             except Exception:
                 import traceback
                 print(colored("[Solver] backend failed on a submap:", "red"))
                 traceback.print_exc()
+            finally:
+                self._backend_active = False
+
+    def flush(self) -> bool:
+        """Submit the partial submap in hand. Returns whether there was one.
+
+        Separate from shutdown() so a caller can drain the pipeline and keep
+        running -- waiting for is_busy() to clear without flushing first would
+        wait forever, because the tail is only submitted here.
+        """
+        if not self._running or len(self._pending_keyframes) <= self._overlap:
+            return False  # a tail no longer than the overlap holds no new frames
+        self._submit(self._pending_keyframes)
+        self._pending_keyframes = self._pending_keyframes[-self._overlap:]
+        return True
 
     def shutdown(self, flush: bool = True):
         """Stop the pipeline, optionally finishing the partial submap in hand."""
         if not self._running:
             return
-        # A tail shorter than the carried-over overlap holds no new frames.
-        if flush and len(self._pending_keyframes) > self._overlap:
-            self._submit(self._pending_keyframes)
+        if flush:
+            self.flush()
         self._pending_keyframes = []
         self._running = False
 
@@ -659,9 +703,26 @@ class Solver:
               f"{self._submaps_dropped} dropped).")
 
     def is_busy(self) -> bool:
-        return self._running and (
-            not self._gpu_q.empty() or not self._backend_q.empty()
-            or self._submaps_done < self._submaps_submitted)
+        """True while any frame already handed to track() has yet to reach the map.
+
+        Covers four places work hides, not just the queues:
+          * keyframes buffered in the frontend that shutdown() will still flush
+          * the queues themselves
+          * a submap in the GPU worker (off the queue, not yet on the next)
+          * a submap in the backend, including its on_submap callback
+
+        Counting only the queues reports "drained" while two submaps are still
+        in flight, which is exactly wrong for anyone using this to decide that
+        a replay has finished.
+        """
+        if not self._running:
+            return False
+        pending_tail = len(self._pending_keyframes) > getattr(self, "_overlap", 0)
+        return (pending_tail
+                or not self._gpu_q.empty()
+                or not self._backend_q.empty()
+                or self._backend_active
+                or self._submaps_done < self._submaps_submitted)
 
     def get_stats(self) -> dict:
         return {

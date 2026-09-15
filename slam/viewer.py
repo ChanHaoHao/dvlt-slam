@@ -183,7 +183,7 @@ class Viewer:
         """
         import torch
         from torchvision.transforms.functional import to_pil_image
-        import vggt_slam.slam_utils as utils
+        import slam.slam_utils as utils
 
         with self.server.gui.add_folder("Object Query"):
             gui_query = self.server.gui.add_text("Query", initial_value="")

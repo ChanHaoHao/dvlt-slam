@@ -26,8 +26,8 @@ import torch
 from open3d.visualization import rendering
 from tqdm.auto import tqdm
 
-import vggt_slam.slam_utils as utils
-from vggt_slam.solver import Solver
+import slam.slam_utils as utils
+from slam.solver import Solver
 
 
 # Qualitative palette: distinct hues, readable on white, colour-blind friendly ordering.
@@ -39,7 +39,7 @@ PALETTE = np.array([
 
 
 def build_map(args):
-    from vggt_slam.dvlt_backbone import DVLTBackbone
+    from slam.backbones.dvlt_backbone import DVLTBackbone
 
     solver = Solver(
         init_conf_threshold=args.conf_threshold,

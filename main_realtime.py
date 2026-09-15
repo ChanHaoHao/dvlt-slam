@@ -12,10 +12,10 @@ import cv2
 import torch
 from torchvision.transforms.functional import to_pil_image
 
-import vggt_slam.slam_utils as utils
-from vggt_slam.backbone import build_backbone
-from vggt_slam.solver import Solver
-from vggt_slam.cameras import BACKENDS
+import slam.slam_utils as utils
+from slam.backbones import build_backbone
+from slam.solver import Solver
+from slam.cameras import BACKENDS
 
 parser = argparse.ArgumentParser(description="Live SLAM demo (DVLT or VGGT backbone)")
 parser.add_argument("--keyframe_folder", type=str, default="keyframes", help="Folder to save captured keyframes")

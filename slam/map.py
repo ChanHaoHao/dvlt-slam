@@ -4,7 +4,7 @@ import torch
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
 import matplotlib.pyplot as plt
-from vggt_slam.slam_utils import decompose_camera, cosine_similarity
+from slam.slam_utils import decompose_camera, cosine_similarity
 
 class GraphMap:
     def __init__(self):

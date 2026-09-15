@@ -60,9 +60,13 @@ harmful, `--lc_verify` defaults to `attn` here, not to upstream's `bypass`.
 This repo is upstream VGGT-SLAM @ `35327ac` with history removed, plus:
 
 ```
-vggt_slam/dvlt_backbone.py    the adapter — DVLT behind VGGT's calling convention
+slam/backbones/               one module per submap backbone; base.py states the
+                              contract, dvlt_backbone.py is the adapter that puts
+                              DVLT behind VGGT's calling convention
 main.py                       --backbone/--dvlt_k/--lc_verify (default: dvlt/attn)
-dvlt/                         submodule, pinned @ 134b21f (nv-tlabs/dvlt)
+third_party/dvlt/             submodule, pinned @ 134b21f (nv-tlabs/dvlt)
+third_party/salad/            submodule, pinned @ 33ca9c0 (Dominic101/salad)
+third_party/vggt/             submodule, pinned @ 6e6e161 (MIT-SPARK/VGGT_SPARK)
 evals/eval_tum_backbone.sh    TUM ATE harness (records failures as NaN, not 0.0)
                               SEQ_SET=fr1|fr23|all, RESUME=1 to skip done sequences
 evals/eval_7scenes_backbone.sh  the same harness for 7-Scenes
@@ -84,7 +88,7 @@ installed no packages at all.
 ## Reproducing
 
 ```bash
-# 1. this repo, with the dvlt submodule at its pinned commit
+# 1. this repo, with its submodules (dvlt, salad, vggt) at their pinned commits
 git clone --recursive <this-repo> dvlt-slam
 cd dvlt-slam
 # (already cloned without --recursive? git submodule update --init)
@@ -96,12 +100,13 @@ uv sync                      # creates .venv from uv.lock
 uv pip install pip           # torch.utils.collect_env shells out to `python -m pip`,
                              # and uv venvs ship without pip
 
-# 3. `uv sync` above already installed THIS project (vggt_slam + evals) editable.
+# 3. `uv sync` above already installed THIS project (slam + evals) editable.
 #    The other three are upstream trees, absent from the lock on purpose.
 #    Order matters: `uv sync` prunes anything not in the lock, so run it FIRST —
 #    re-running it later will silently uninstall these three again.
-./setup.sh                   # clones third_party/{salad,vggt}, then installs
-                             # dvlt + both editable with --no-deps. Idempotent.
+./setup.sh                   # inits the submodules, then installs
+                             # third_party/{dvlt,salad,vggt} editable, --no-deps.
+                             # Idempotent.
                              # --with-os also fetches sam3 + perception_models,
                              # which are lazily imported behind --run_os.
 
@@ -117,11 +122,13 @@ python evals/collect_all_results.py
 
 ## Gotchas worth knowing
 
-- **DVLT emits `camera_to_worlds`; the pose encoder wants world-to-camera.**
-  Getting this backwards yields a plausible but mirrored trajectory.
-  `selftest_pose_roundtrip()` in the adapter guards it.
-- **`target_tokens` is dead code** in `vggt_slam` — referenced once, only to be
-  excluded from a cast. Nothing to reproduce.
+- **DVLT emits `camera_to_worlds`; the solver wants world-to-camera.**
+  `c2w_to_w2c` in the adapter does the inversion. Getting it backwards yields a
+  plausible but mirrored trajectory.
+- **Backbones hand the solver matrices, not VGGT's `pose_enc`.** They used to go
+  through `absT_quaR_FoV`, which stores only a field of view: the decode rebuilds
+  the principal point as `(W/2, H/2)`. That is VGGT's own prediction, but it
+  silently discarded DVLT's predicted `cx`/`cy`. Don't reintroduce that hop.
 - **The stock `evals/eval_tum.sh` scores a failed sequence as `0.0`**
   (`rmse=${rmse:-0}`), which silently *lowers* the mean. Our harness records NaN.
 - **Peak memory is flat in `K`** and linear in the number of frames
@@ -148,7 +155,7 @@ python evals/collect_all_results.py
 
 This repo **redistributes upstream VGGT-SLAM source** (it is a history-stripped
 fork), so upstream's BSD-2-Clause terms apply to that code and
-[`LICENSE`](LICENSE) is retained unmodified. Only `vggt_slam/dvlt_backbone.py`,
+[`LICENSE`](LICENSE) is retained unmodified. Only `slam/backbones/`,
 `evals/*_backbone.sh` and `evals/collect_all_results.py` are new work.
 
 | component | licence |

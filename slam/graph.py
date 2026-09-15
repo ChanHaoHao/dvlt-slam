@@ -1,15 +1,12 @@
 import gtsam
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
-import numpy as np
-from mpl_toolkits.mplot3d import Axes3D
 from gtsam import NonlinearFactorGraph, Values, noiseModel
 from gtsam import SL4, PriorFactorSL4, BetweenFactorSL4
 from gtsam.symbol_shorthand import X
 
-from vggt_slam.slam_utils import decompose_camera, normalize_to_sl4
+# normalize_to_sl4 is referenced only by the commented-out normalisation lines
+# below; kept so uncommenting them still works.
+from slam.slam_utils import normalize_to_sl4
 
 class PoseGraph:
     def __init__(self):

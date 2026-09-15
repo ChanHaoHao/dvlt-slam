@@ -5,7 +5,7 @@ import torch
 import numpy as np
 import scipy
 import open3d as o3d
-from vggt_slam.slam_utils import decompose_camera
+from slam.slam_utils import decompose_camera
 
 class Submap:
     def __init__(self, submap_id):
