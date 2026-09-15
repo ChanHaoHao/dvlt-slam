@@ -1,3 +1,9 @@
-[submodule "dvlt"]
-	path = dvlt
+[submodule "third_party/dvlt"]
+	path = third_party/dvlt
 	url = https://github.com/nv-tlabs/dvlt.git
+[submodule "third_party/salad"]
+	path = third_party/salad
+	url = https://github.com/Dominic101/salad.git
+[submodule "third_party/vggt"]
+	path = third_party/vggt
+	url = https://github.com/MIT-SPARK/VGGT_SPARK.git

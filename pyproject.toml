@@ -8,7 +8,7 @@ requires-python = ">=3.11,<3.12"
 # External dependencies of the combined DVLT + VGGT-SLAM environment, pinned to the
 # versions that produced the results in report/. This project itself is locked as
 # an editable entry, so `uv sync` installs vggt_slam + evals. The three OTHER local
-# packages -- the dvlt submodule and third_party/{salad,vggt} -- are deliberately
+# packages -- the third_party/{dvlt,salad,vggt} submodules -- are deliberately
 # absent: they are upstream working trees, not portably lockable. Install them
 # after `uv sync`, with --no-deps.
 dependencies = [

@@ -1,12 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
-# Clones the local source trees that are deliberately absent from uv.lock, and
-# installs them editable with --no-deps.
+# Installs the local source trees that are deliberately absent from uv.lock,
+# editable and with --no-deps.
 #
 # PREREQUISITE: run `uv sync` FIRST. It builds .venv from the lock file and
-# installs this project (vggt_slam + evals) editable. It also PRUNES anything
+# installs this project (slam + evals) editable. It also PRUNES anything
 # not in the lock, so re-running it later silently uninstalls everything below.
+#
+# third_party/{dvlt,salad,vggt} are git submodules; this script
+# initialises them rather than cloning. SAM 3 and the Perception Encoder are
+# still plain clones -- they are only imported behind --run_os.
 #
 # This script does NOT `pip install -r requirements.txt`: that file is upstream's
 # and pins torch==2.3.1, which would clobber the locked torch 2.5.1+cu124 that
@@ -29,15 +33,22 @@ if [ ! -d "$REPO/.venv" ]; then
     echo "error: no .venv. Run 'uv sync' first." >&2
     exit 1
 fi
-if [ ! -e "$REPO/dvlt/pyproject.toml" ]; then
-    echo "error: dvlt submodule is empty. Run 'git submodule update --init'." >&2
-    exit 1
-fi
 
 WITH_OS=0
 [ "${1:-}" = "--with-os" ] && WITH_OS=1
 
-mkdir -p third_party
+echo "Initialising submodules (dvlt, salad, vggt)..."
+git -C "$REPO" submodule update --init --recursive
+
+for m in third_party/dvlt third_party/salad third_party/vggt; do
+    if [ ! -e "$REPO/$m/setup.py" ] && [ ! -e "$REPO/$m/pyproject.toml" ]; then
+        echo "error: submodule $m is empty or incomplete." >&2
+        echo "       try 'git submodule update --init --force $m'" >&2
+        exit 1
+    fi
+done
+
+TREES=(./third_party/dvlt ./third_party/salad ./third_party/vggt)
 
 # clone <url> <dest>  -- idempotent; leaves an existing tree alone
 clone() {
@@ -48,15 +59,8 @@ clone() {
     fi
 }
 
-echo "Cloning SALAD (loop-closure place recognition)..."
-clone https://github.com/Dominic101/salad.git third_party/salad
-
-echo "Cloning VGGT (the --backbone vggt baseline)..."
-clone https://github.com/MIT-SPARK/VGGT_SPARK.git third_party/vggt
-
-TREES=(./dvlt ./third_party/salad ./third_party/vggt)
-
 if [ "$WITH_OS" -eq 1 ]; then
+    mkdir -p third_party
     echo "Cloning Perception Encoder and SAM 3 (--run_os only)..."
     clone https://github.com/facebookresearch/perception_models.git third_party/perception_models
     clone https://github.com/facebookresearch/sam3.git third_party/sam3
