@@ -66,9 +66,13 @@ class Solver:
         clip_model=None,
         clip_preprocess=None,
         viewer: bool = True,
-        viewer_port: int = 8080):
+        viewer_port: int = 8080,
+        scale_depth_percentile: float = 0.0):
 
         self.init_conf_threshold = init_conf_threshold
+        # See add_edge: restricts the inter-submap scale estimate to the nearest
+        # N% of confident overlap points. 0 disables (upstream behaviour).
+        self.scale_depth_percentile = scale_depth_percentile
         self.vis_voxel_size = vis_voxel_size
         self.vis_imgs = vis_imgs
 
@@ -78,9 +82,8 @@ class Solver:
         self.clip_model = clip_model
         self.clip_preprocess = clip_preprocess
 
-        # Keep the historical default for the standalone entry points, while
-        # allowing ROS/RViz-only runs to avoid binding an unnecessary Viser
-        # server.
+        # Keep the historical default for standalone entry points. ROS/RViz-only
+        # callers pass viewer=False, avoiding an unnecessary Viser server/port.
         self.viewer = Viewer(port=viewer_port) if viewer else None
 
         self.flow_tracker = FrameTracker()
@@ -156,11 +159,17 @@ class Solver:
         self.viewer.visualize_frames(extrinsics, images, submap.get_id())
 
     def update_all_submap_vis(self):
+        # Guarded here as well as in the setters: assembling world-frame points
+        # for every submap is expensive, and with no viewer it is pure waste.
+        if self.viewer is None:
+            return
         for submap in self.map.get_submaps():
             self.set_submap_point_cloud(submap)
             self.set_submap_poses(submap)
 
     def update_latest_submap_vis(self):
+        if self.viewer is None:
+            return
         submap = self.map.get_latest_submap()
         self.set_submap_point_cloud(submap)
         self.set_submap_poses(submap)
@@ -204,11 +213,37 @@ class Solver:
                 if np.sum(good_mask) < 100: # Handle the case where loop closure frames do not have enough points. 
                     good_mask = (prior_conf > 0).reshape(-1)
 
+            # Depth band. estimate_scale_pairwise fits ONE scalar to the ratio
+            # y_dist/x_dist over every confident point. That ratio is constant
+            # only if the two submaps differ by a similarity; under a projective
+            # difference it varies with depth, so the median lands wherever that
+            # frame's median depth happened to be -- open road at one seam, a
+            # building face at the next. Restricting every seam to the same
+            # relative depth slice makes the bias consistent rather than
+            # wandering, and a consistent scale bias is absorbed by Umeyama
+            # alignment at scoring time.
+            #
+            # A percentile, not metres: the reconstruction is not metric, so an
+            # absolute cut would mean a different physical distance per submap,
+            # reintroducing exactly the inconsistency this is meant to remove.
+            if self.scale_depth_percentile > 0:
+                d_cur = np.linalg.norm(
+                    current_submap.get_frame_pointcloud(frame_id_curr).reshape(-1, 3), axis=1)
+                cutoff = np.percentile(d_cur[good_mask], self.scale_depth_percentile)
+                banded = good_mask & (d_cur <= cutoff)
+                if np.sum(banded) >= 100:
+                    good_mask = banded
+                else:
+                    print(colored(
+                        f"Depth band left only {np.sum(banded)} points; keeping the unbanded mask",
+                        'yellow'))
+
             P_temp = np.linalg.inv(prior_submap.proj_mats[-1]) @ current_submap.proj_mats[0]
             t1 = (P_temp[0:3,0:3] @ current_submap.get_frame_pointcloud(frame_id_curr).reshape(-1, 3)[good_mask].T).T
             t2 = prior_submap.get_frame_pointcloud(frame_id_prev).reshape(-1, 3)[good_mask]
             scale_factor_est_output = estimate_scale_pairwise(t1, t2)
-            print(colored("scale factor", 'green'), scale_factor_est_output)
+            print(colored("scale factor", 'green'), scale_factor_est_output,
+                  f"[{int(np.sum(good_mask))} pts]")
             scale_factor = scale_factor_est_output[0]
             H_scale = np.diag((scale_factor, scale_factor, scale_factor, 1.0))
 

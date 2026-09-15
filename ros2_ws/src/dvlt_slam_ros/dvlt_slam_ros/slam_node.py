@@ -73,6 +73,7 @@ class DvltSlamNode(Node):
             ("max_loops", 1),
             ("min_disparity", 15.0),
             ("conf_threshold", 25.0),
+            ("scale_depth_percentile", 0.0),   # 0 = all points; e.g. 50 = nearest half
             ("lc_thres", 0.95),
             ("keyframe_dir", "keyframes"),
             # output
@@ -110,6 +111,7 @@ class DvltSlamNode(Node):
             model=model,
             viewer=self.cfg["vis_map"],
             viewer_port=self.cfg["viewer_port"],
+            scale_depth_percentile=self.cfg["scale_depth_percentile"],
         )
         if self.cfg["vis_map"]:
             self.get_logger().info(

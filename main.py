@@ -25,7 +25,8 @@ parser.add_argument("--log_path", type=str, default="poses.txt", help="Path to s
 parser.add_argument("--submap_size", type=int, default=16, help="Number of new frames per submap, does not include overlapping frames or loop closure frames")
 parser.add_argument("--overlapping_window_size", type=int, default=1, help="ONLY DEFAULT OF 1 SUPPORTED RIGHT NOW. Number of overlapping frames, which are used in SL(4) estimation")
 parser.add_argument("--max_loops", type=int, default=1, help="ONLY DEFAULT OF 1 SUPPORTED RIGHT NOW or 0 to disable loop closures.")
-parser.add_argument("--min_disparity", type=float, default=50, help="Minimum disparity to generate a new keyframe")
+parser.add_argument("--min_disparity", type=float, default=15, help="Minimum disparity to generate a new keyframe")
+parser.add_argument("--scale_depth_percentile", type=float, default=0.0, help="Restrict the inter-submap scale estimate to the nearest N%% of confident overlap points (0 = use all, upstream behaviour)")
 parser.add_argument("--conf_threshold", type=float, default=25.0, help="Initial percentage of low-confidence points to filter out")
 parser.add_argument("--lc_thres", type=float, default=0.95, help="Threshold for image retrieval. Range: [0, 1.0]. Higher = more loop closures")
 parser.add_argument("--backbone", type=str, default="dvlt", choices=["vggt", "dvlt"], help="Per-submap reconstruction backbone. 'dvlt' swaps in Deja View; the factor graph, loop closure detection and SL(4) correction are unchanged either way")
@@ -49,7 +50,8 @@ def main():
         init_conf_threshold=args.conf_threshold,
         lc_thres=args.lc_thres,
         vis_voxel_size=args.vis_voxel_size,
-        vis_imgs=args.vis_imgs
+        vis_imgs=args.vis_imgs,
+        scale_depth_percentile=args.scale_depth_percentile,
     )
 
     print(f"Initializing and loading {args.backbone.upper()} model...")
