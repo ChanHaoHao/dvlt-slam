@@ -1,24 +1,23 @@
-import os
+"""Live SLAM demo, DVLT or VGGT backbone.
+
+A thin driver: build the models, hand them to the Solver, then push frames at
+it. All the concurrency lives inside Solver.start() / Solver.track() so that a
+ROS node, a different camera backend, or this file are interchangeable callers.
+"""
+
 import time
-import threading
 import argparse
 
 import cv2
-import numpy as np
 import torch
 from torchvision.transforms.functional import to_pil_image
 
 import vggt_slam.slam_utils as utils
+from vggt_slam.backbone import build_backbone
 from vggt_slam.solver import Solver
 from vggt_slam.cameras import BACKENDS
 
-from vggt.models.vggt import VGGT
-
-# --- Thread Safety Primitives ---
-solver_lock = threading.Lock()  # Ensures only one solver thread runs at a time
-data_lock = threading.Lock()    # Protects shared SLAM state (solver)
-
-parser = argparse.ArgumentParser(description="VGGT-SLAM RealSense live demo")
+parser = argparse.ArgumentParser(description="Live SLAM demo (DVLT or VGGT backbone)")
 parser.add_argument("--keyframe_folder", type=str, default="keyframes", help="Folder to save captured keyframes")
 parser.add_argument("--camera", type=str, default="realsense", choices=list(BACKENDS.keys()), help="Camera backend (default: realsense)")
 parser.add_argument("--vis_map", action="store_true", help="Visualize point cloud in viser as it is being built, otherwise only show the final map")
@@ -35,25 +34,19 @@ parser.add_argument("--lc_thres", type=float, default=0.95, help="Threshold for 
 parser.add_argument("--log_results", action="store_true", help="save txt file with results")
 parser.add_argument("--skip_dense_log", action="store_true", help="by default, logging poses and logs dense point clouds. If this flag is set, dense logging is skipped")
 parser.add_argument("--log_path", type=str, default="poses.txt", help="Path to save the log file")
+parser.add_argument("--backbone", type=str, default="dvlt", choices=["vggt", "dvlt"], help="Per-submap reconstruction backbone")
+parser.add_argument("--dvlt_checkpoint", type=str, default="nvidia/dvlt", help="DVLT checkpoint: local dir, HTTPS URL, or HF Hub repo id")
+parser.add_argument("--dvlt_k", type=int, default=None, help="DVLT refinement iterations K at inference. Default: the checkpoint's own inference_steps")
+parser.add_argument("--lc_verify", type=str, default="attn", choices=["bypass", "attn"], help="How the DVLT backbone produces image_match_ratio for loop-closure verification")
+parser.add_argument("--lc_attn_step", type=int, default=None, help="Iteration k to read attention from when --lc_verify=attn")
+parser.add_argument("--queue_depth", type=int, default=1, help="Submaps allowed to queue for the GPU worker before track() starts dropping them")
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def save_keyframe(img: np.ndarray, folder: str, idx: int) -> str:
-    filename = os.path.join(folder, f"frame_{idx:06d}.png")
-    cv2.imwrite(filename, img)
-    return filename
-
-
-def restart_camera(camera, stop_event=None, retry_delay: float = 2.0):
+def restart_camera(camera, retry_delay: float = 2.0, max_attempts: int = None):
     """Stop and re-start the camera, retrying until a device is streaming again.
 
-    Used to recover from a mid-session disconnect (e.g. a RealSense USB drop),
-    where ``capture()`` raises. Honors ``stop_event`` so the user can still
-    cancel while a camera is unplugged. Returns the working camera object, or
-    None if aborted via stop_event.
+    Recovers from a mid-session disconnect (e.g. a RealSense USB drop), where
+    ``capture()`` raises. Returns the working camera, or None if it gave up.
     """
     try:
         camera.stop()
@@ -61,7 +54,7 @@ def restart_camera(camera, stop_event=None, retry_delay: float = 2.0):
         pass  # device may already be gone; ignore teardown errors
 
     attempt = 0
-    while stop_event is None or not stop_event.is_set():
+    while max_attempts is None or attempt < max_attempts:
         attempt += 1
         try:
             camera.start()
@@ -71,54 +64,25 @@ def restart_camera(camera, stop_event=None, retry_delay: float = 2.0):
             print(f"[Camera] Reconnect attempt {attempt} failed: {e}.")
             print(f"[Camera] Retrying in {retry_delay:.0f}s...")
             time.sleep(retry_delay)
-    print("[Camera] Reconnection aborted (session cancelled).")
     return None
 
 
-def threaded_process_submap(image_names_subset, solver, model, args, clip_model, clip_preprocess):
-    """Background thread: run VGGT inference + graph optimisation for one submap."""
-    try:
-        print(f"[SLAM] Processing submap ({len(image_names_subset)} frames)...")
-        predictions = solver.run_predictions(
-            image_names_subset, model, args.max_loops, clip_model, clip_preprocess
-        )
-        with data_lock:
-            solver.add_points(predictions)
-            solver.graph.optimize()
-            if args.vis_map:
-                if len(predictions.get("detected_loops", [])) > 0:
-                    solver.update_all_submap_vis()
-                else:
-                    solver.update_latest_submap_vis()
-        print("[SLAM] Submap done.")
-    except Exception as e:
-        import traceback
-        print(f"[SLAM ERROR] {e}")
-        traceback.print_exc()
-    finally:
-        if solver_lock.locked():
-            solver_lock.release()
-
-
-def run_semantic_query_loop(args, solver, clip_model, clip_tokenizer, processor):
+def run_semantic_query_loop(solver, clip_model, clip_tokenizer, processor):
     """Interactive open-set semantic query loop, run after capture ends."""
     while True:
         query = input("\nEnter text query or q to quit: ").strip()
-        if len(query) == 0:
-            print("Empty query. Exiting.")
-            return
-        if query == "q":
+        if len(query) == 0 or query == "q":
             print("Exiting.")
             return
 
         text_emb = utils.compute_text_embeddings(clip_model, clip_tokenizer, query)
-        overall_best_score, overall_best_submap_id, overall_best_frame_index = \
-            solver.map.retrieve_best_semantic_frame(text_emb)
+        with solver.map_lock:
+            best_score, best_submap_id, best_frame_index = \
+                solver.map.retrieve_best_semantic_frame(text_emb)
+            found_submap = solver.map.get_submap(best_submap_id)
+            best_img = found_submap.get_frame_at_index(best_frame_index)
 
-        found_submap = solver.map.get_submap(overall_best_submap_id)
-
-        best_img = found_submap.get_frame_at_index(overall_best_frame_index)
-        print("Score:", overall_best_score)
+        print("Score:", best_score)
         with torch.no_grad():
             best_img = to_pil_image(best_img)
             inference_state = processor.set_image(best_img)
@@ -132,15 +96,12 @@ def run_semantic_query_loop(args, solver, clip_model, clip_tokenizer, processor)
 
         for i in range(masks.shape[0]):
             mask = masks[i].cpu().numpy()
-            obb_center, obb_extent, obb_rotation = utils.compute_obb_from_points(
-                found_submap.get_points_in_mask(overall_best_frame_index, mask, solver.graph)
-            )
+            with solver.map_lock:
+                points = found_submap.get_points_in_mask(best_frame_index, mask, solver.graph)
+            obb_center, obb_extent, obb_rotation = utils.compute_obb_from_points(points)
             solver.viewer.visualize_obb(
-                center=obb_center,
-                extent=obb_extent,
-                rotation=obb_rotation,
-                color=(255, 0, 0),
-                line_width=8.0,
+                center=obb_center, extent=obb_extent, rotation=obb_rotation,
+                color=(255, 0, 0), line_width=8.0,
             )
 
 
@@ -155,50 +116,47 @@ def main():
     # case and print periodic status to the console instead.
     use_display = not args.run_os
 
-    solver = Solver(
-        init_conf_threshold=args.conf_threshold,
-        lc_thres=args.lc_thres,
-        vis_voxel_size=args.vis_voxel_size,
-        vis_imgs=args.vis_imgs,
-    )
-
-    print("Initializing and loading reconstruction backbone...")
-
+    clip_model = clip_preprocess = clip_tokenizer = processor = None
     if args.run_os:
         from sam3.model_builder import build_sam3_image_model
         from sam3.model.sam3_image_processor import Sam3Processor
         import core.vision_encoder.pe as pe
         import core.vision_encoder.transforms as transforms
 
-        sam3_model = build_sam3_image_model()
-        processor = Sam3Processor(sam3_model, confidence_threshold=0.50)
-
-        clip_model = pe.CLIP.from_config("PE-Core-L14-336", pretrained=True)  # Downloads from HF
-        clip_model = clip_model.cuda()
+        processor = Sam3Processor(build_sam3_image_model(), confidence_threshold=0.50)
+        clip_model = pe.CLIP.from_config("PE-Core-L14-336", pretrained=True).cuda()
         clip_tokenizer = transforms.get_text_tokenizer(clip_model.context_length)
         clip_preprocess = transforms.get_image_transform(clip_model.image_size)
-    else:
-        clip_model, clip_preprocess = None, None
-        clip_tokenizer, processor = None, None
 
-    model = VGGT()
-    _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
-    model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+    print(f"Initializing and loading {args.backbone.upper()} model...")
+    model = build_backbone(
+        backbone=args.backbone,
+        device=device,
+        dvlt_checkpoint=args.dvlt_checkpoint,
+        dvlt_k=args.dvlt_k,
+        lc_verify=args.lc_verify,
+        lc_attn_step=args.lc_attn_step,
+    )
 
-    model.eval()
-    model = model.to(torch.bfloat16)  # use half precision
-    model = model.to(device)
-    print(f"All models loaded ({utils.backbone_name(model)} backbone). Starting SLAM loop.")
+    solver = Solver(
+        init_conf_threshold=args.conf_threshold,
+        lc_thres=args.lc_thres,
+        vis_voxel_size=args.vis_voxel_size,
+        vis_imgs=args.vis_imgs,
+        model=model,
+        clip_model=clip_model,
+        clip_preprocess=clip_preprocess,
+    )
+    backbone = utils.backbone_name(model)
+    # One name for both imshow calls: a mismatch opens two windows.
+    window_name = f"{backbone}-SLAM Live"
+    print(f"All models loaded ({backbone} backbone). Starting SLAM loop.")
 
-    # Register the viser object-query panel so the user can search for objects
-    # live (and after capture) without using the terminal.
     if args.run_os:
-        solver.viewer.add_object_query_gui(solver, clip_model, clip_tokenizer, processor, data_lock)
+        solver.viewer.add_object_query_gui(solver, clip_model, clip_tokenizer, processor, solver.map_lock)
 
-    # --- Camera setup ---
     camera = BACKENDS[args.camera]()
     print(f"Initializing {args.camera} camera...")
-    os.makedirs(args.keyframe_folder, exist_ok=True)
     camera.start()
 
     # Warm up the camera — first few frames can be None
@@ -210,104 +168,81 @@ def main():
         except Exception as e:
             print(f"[Camera] Error during warm-up ({e}). Reconnecting...")
             camera = restart_camera(camera)
-
+            if camera is None:
+                return
     if use_display:
-        cv2.imshow("VGGT-SLAM Live", first_frame)
+        cv2.imshow(window_name, first_frame)
         cv2.waitKey(1)
     print("Camera ready.")
 
-    frame_count = 0
-    image_names_subset = []
-    target_size = args.submap_size + args.overlapping_window_size
-    submap_count = 0
-    last_status_frame = 0  # for console status throttle when display is off
-    stop_event = threading.Event()
+    solver.start(
+        submap_size=args.submap_size,
+        overlapping_window_size=args.overlapping_window_size,
+        max_loops=args.max_loops,
+        min_disparity=args.min_disparity,
+        keyframe_dir=args.keyframe_folder,
+        vis_map=args.vis_map,
+        vis_flow=args.vis_flow,
+        gpu_queue_depth=args.queue_depth,
+    )
 
+    last_status_frame = 0
     try:
         while True:
-            if stop_event.is_set():
-                break
-
             try:
                 img = camera.capture()
             except Exception as e:
                 print(f"[Camera] Lost connection ({e}). Attempting to reconnect...")
-                camera = restart_camera(camera, stop_event)
-                if camera is None:  # session cancelled while reconnecting
+                camera = restart_camera(camera)
+                if camera is None:
                     break
                 continue
-
             if img is None:
                 continue
 
-            frame_count += 1
-
-            if solver.flow_tracker.compute_disparity(img, args.min_disparity, args.vis_flow):
-                frame_path = save_keyframe(img, args.keyframe_folder, frame_count)
-                image_names_subset.append(frame_path)
-
-            if len(image_names_subset) >= target_size:
-                if solver_lock.acquire(blocking=False):
-                    submap_count += 1
-                    print(f"[Main] Launching submap {submap_count} (frame {frame_count})...")
-                    t = threading.Thread(
-                        target=threaded_process_submap,
-                        args=(list(image_names_subset), solver, model, args, clip_model, clip_preprocess),
-                        daemon=True,
-                    )
-                    t.start()
-                    image_names_subset = image_names_subset[-args.overlapping_window_size:]
-                else:
-                    # SLAM still busy; cap the backlog so we don't grow unbounded.
-                    if len(image_names_subset) > target_size * 2:
-                        image_names_subset = image_names_subset[-target_size:]
-
-            kf = len(image_names_subset)
-            slam_busy = solver_lock.locked()
+            solver.track(img, timestamp=time.time())
+            stats = solver.get_stats()
 
             if use_display:
                 display = img.copy()
-                status = f"KFs: {kf}/{target_size}  Submaps: {submap_count}"
-                if slam_busy:
+                status = f"KFs: {stats['pending']}/{stats['target_size']}  Submaps: {stats['done']}"
+                if stats["busy"]:
                     status += "  [SLAM running]"
+                if stats["dropped"]:
+                    status += f"  [dropped {stats['dropped']}]"
                 cv2.putText(display, status, (8, 22),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                cv2.imshow("VGGT-SLAM Live", display)
+                cv2.imshow(window_name, display)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
-            else:
-                if frame_count - last_status_frame >= 30:
-                    busy_str = "  [SLAM running]" if slam_busy else ""
-                    print(f"[Camera] frame={frame_count}  KFs={kf}/{target_size}"
-                          f"  submaps={submap_count}{busy_str}")
-                    last_status_frame = frame_count
+            elif stats["frames"] - last_status_frame >= 30:
+                busy_str = "  [SLAM running]" if stats["busy"] else ""
+                print(f"[Camera] frame={stats['frames']}  KFs={stats['pending']}/{stats['target_size']}"
+                      f"  submaps={stats['done']}  dropped={stats['dropped']}{busy_str}")
+                last_status_frame = stats["frames"]
 
     except KeyboardInterrupt:
         print("\n[Main] Shutting down...")
     finally:
-        if camera is not None:
-            camera.stop()
+        camera.stop()
         if use_display:
             cv2.destroyAllWindows()
+        solver.shutdown()  # finishes the partial submap and joins the workers
 
-    # Wait for any in-flight submap to finish before final visualization/logging.
-    with solver_lock:
-        pass
-
-    print("Total number of submaps in map", solver.map.get_num_submaps())
-    print("Total number of loop closures in map", solver.graph.get_num_loops())
-
-    if not args.vis_map:
-        # just show the map after all submaps have been processed
-        solver.update_all_submap_vis()
+    with solver.map_lock:
+        print("Total number of submaps in map", solver.map.get_num_submaps())
+        print("Total number of loop closures in map", solver.graph.get_num_loops())
+        if not args.vis_map:
+            solver.update_all_submap_vis()
 
     if args.run_os:
-        run_semantic_query_loop(args, solver, clip_model, clip_tokenizer, processor)
+        run_semantic_query_loop(solver, clip_model, clip_tokenizer, processor)
 
     if args.log_results:
-        solver.map.write_poses_to_file(args.log_path, solver.graph, kitti_format=False)
-        if not args.skip_dense_log:
-            solver.map.write_points_to_file(solver.graph, args.log_path.replace(".txt", "_points.pcd"))
+        with solver.map_lock:
+            solver.map.write_poses_to_file(args.log_path, solver.graph, kitti_format=False)
+            if not args.skip_dense_log:
+                solver.map.write_points_to_file(solver.graph, args.log_path.replace(".txt", "_points.pcd"))
 
 
 if __name__ == "__main__":

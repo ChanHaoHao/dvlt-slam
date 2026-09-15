@@ -1,3 +1,8 @@
+import os
+import queue
+import threading
+from dataclasses import dataclass
+
 import numpy as np
 import cv2
 import gtsam
@@ -23,6 +28,25 @@ from vggt_slam.viewer import Viewer
 
 DEBUG = False
 
+_SHUTDOWN = object()  # queue sentinel
+
+
+@dataclass
+class _SubmapWork:
+    """One submap in flight between the GPU worker and the backend thread.
+
+    Everything the backend needs that the GPU produced. Carried through the
+    queue rather than parked on ``self`` so two submaps can be in flight
+    without stepping on each other.
+    """
+    image_names: list
+    images: object
+    predictions: dict
+    retrieval_vectors: object
+    semantic_vectors: object
+    model: object
+
+
 def debug_visualize(pcd1_points, pcd2_points):
     pcd1 = o3d.geometry.PointCloud()
     pcd1.points = o3d.utility.Vector3dVector(pcd1_points)
@@ -39,11 +63,20 @@ class Solver:
         init_conf_threshold: float,  # represents percentage (e.g., 50 means filter lowest 50%)
         lc_thres: float = 0.80,
         vis_voxel_size: float = None,
-        vis_imgs: bool = False):
+        vis_imgs: bool = False,
+        model=None,
+        clip_model=None,
+        clip_preprocess=None):
 
         self.init_conf_threshold = init_conf_threshold
         self.vis_voxel_size = vis_voxel_size
         self.vis_imgs = vis_imgs
+
+        # The solver owns its models, so a caller needs only Solver + track().
+        # Still accepted per-call by run_predictions() for the batch path.
+        self.model = model
+        self.clip_model = clip_model
+        self.clip_preprocess = clip_preprocess
 
         self.viewer = Viewer()
 
@@ -60,6 +93,24 @@ class Solver:
         self.backbone_timer = Accumulator()
         self.loop_closure_timer = Accumulator()
         self.clip_timer = Accumulator()
+
+        # Guards every read and write of self.map / self.graph. The backend
+        # thread is the only mutator; external readers (viewer panels, final
+        # logging) take it to see a consistent map.
+        self.map_lock = threading.RLock()
+
+        self._running = False
+        self._gpu_thread = None
+        self._backend_thread = None
+        self._gpu_q = None
+        self._backend_q = None
+        self._pending_keyframes = []
+        self._latest_pose = None
+        self._frame_count = 0
+        self._keyframe_count = 0
+        self._submaps_submitted = 0
+        self._submaps_done = 0
+        self._submaps_dropped = 0
 
     @property
     def vggt_timer(self):
@@ -302,7 +353,25 @@ class Solver:
         pixel_coords = torch.stack((y_coords, x_coords), dim=1)
         return pixel_coords
 
-    def run_predictions(self, image_names, model, max_loops, clip_model, clip_preprocess):
+    # ------------------------------------------------------------------
+    # Submap reconstruction, split in two.
+    #
+    # _run_backbone is the GPU half and touches no map or graph state, so the
+    # GPU worker can overlap it with the backend finishing the previous submap.
+    # _finalize_submap is the map half and runs on the backend thread alone.
+    # Anything that reads self.map belongs in the second, never the first.
+    # ------------------------------------------------------------------
+
+    def _run_backbone(self, image_names, model=None, clip_model=None, clip_preprocess=None):
+        """GPU half: image loading, retrieval descriptors, backbone forward."""
+        model = model if model is not None else self.model
+        if model is None:
+            raise RuntimeError(
+                "Solver has no backbone. Pass model= to Solver(), or model= to run_predictions()."
+            )
+        clip_model = clip_model if clip_model is not None else self.clip_model
+        clip_preprocess = clip_preprocess if clip_preprocess is not None else self.clip_preprocess
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
         t1 = time.time()
         with self.backbone_timer:
@@ -310,8 +379,37 @@ class Solver:
         print(f"Loaded and preprocessed {len(image_names)} images in {time.time() - t1:.2f} seconds")
         print(f"Preprocessed images shape: {images.shape}")
 
-        # print("Running inference...")
-        dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+        retrieval_vectors = self.image_retrieval.get_batch_descriptors(images)
+
+        semantic_vectors = None
+        with self.clip_timer:
+            if clip_model is not None and clip_preprocess is not None:
+                semantic_vectors = compute_image_embeddings(clip_model, clip_preprocess, image_names)
+
+        with torch.no_grad():
+            t1 = time.time()
+            with self.backbone_timer:
+                predictions = model(images)
+            print(f"{backbone_name(model)} model inference took {time.time() - t1:.2f} seconds")
+
+        return _SubmapWork(
+            image_names=list(image_names),
+            images=images,
+            predictions=predictions,
+            retrieval_vectors=retrieval_vectors,
+            semantic_vectors=semantic_vectors,
+            model=model,
+        )
+
+    def _finalize_submap(self, work, max_loops=1):
+        """Map half: submap id, loop-closure detection and verification.
+
+        Caller must hold ``self.map_lock``.
+        """
+        model = work.model
+        images = work.images
+        image_names = work.image_names
+        predictions = work.predictions
 
         # First submap so set new pcd num to 0
         if self.map.get_largest_key() is None:
@@ -325,22 +423,13 @@ class Solver:
         new_submap.add_all_frames(images)
         new_submap.set_frame_ids(image_names)
         new_submap.set_last_non_loop_frame_index(images.shape[0] - 1)
-        new_submap.set_all_retrieval_vectors(self.image_retrieval.get_all_submap_embeddings(new_submap))
+        new_submap.set_all_retrieval_vectors(work.retrieval_vectors)
         new_submap.set_img_names(image_names)
-
-        with self.clip_timer:
-            if clip_model is not None and clip_preprocess is not None:
-                image_embs = compute_image_embeddings(clip_model, clip_preprocess, image_names)
-                new_submap.set_all_semantic_vectors(image_embs)
+        if work.semantic_vectors is not None:
+            new_submap.set_all_semantic_vectors(work.semantic_vectors)
 
         self.current_working_submap = new_submap
         print(f"Created new submap in {time.time() - t1:.2f} seconds")
-
-        with torch.no_grad():
-            t1 = time.time()
-            with self.backbone_timer:
-                predictions = model(images)
-            print(f"{backbone_name(model)} model inference took {time.time() - t1:.2f} seconds")
 
         # Check for loop closures and add retrieval vectors from new submap to the database
         predictions_lc = None
@@ -399,3 +488,197 @@ class Solver:
             predictions["frames_lc_names"] = loop_closure_frame_names
 
         return predictions
+
+    def run_predictions(self, image_names, model=None, max_loops=1, clip_model=None, clip_preprocess=None):
+        """Reconstruct one submap end to end, blocking.
+
+        The batch path in main.py calls this. The live pipeline calls the two
+        halves on separate threads instead.
+        """
+        work = self._run_backbone(image_names, model, clip_model, clip_preprocess)
+        with self.map_lock:
+            return self._finalize_submap(work, max_loops)
+
+
+    # ------------------------------------------------------------------
+    # Live pipeline.
+    #
+    # Three stages, mirroring ORB-SLAM3's Tracking / LocalMapping / LoopClosing:
+    #
+    #   track()          runs in the caller's thread. Keyframe gating only —
+    #                    cheap enough to sit in a camera callback.
+    #   _gpu_worker      one thread. _run_backbone, no map access.
+    #   _backend_worker  one thread. The only mutator of map and graph.
+    #
+    # Queues are bounded. When the GPU worker falls behind, track() drops whole
+    # submaps and counts them, rather than growing a backlog silently.
+    # ------------------------------------------------------------------
+
+    def start(self,
+        submap_size: int = 16,
+        overlapping_window_size: int = 1,
+        max_loops: int = 1,
+        min_disparity: float = 50.0,
+        keyframe_dir: str = "keyframes",
+        vis_map: bool = False,
+        vis_flow: bool = False,
+        gpu_queue_depth: int = 1,
+        backend_queue_depth: int = 2,
+        drop_when_full: bool = True):
+        """Spawn the worker threads. Call before the first track().
+
+        ``drop_when_full`` picks the back-pressure policy. True (live camera)
+        drops whole submaps when the GPU worker is behind, keeping track()
+        non-blocking. False (dataset replay) blocks track() instead, so every
+        submap is processed and no frame is lost.
+        """
+        if self._running:
+            raise RuntimeError("Solver pipeline is already running.")
+        if self.model is None:
+            raise RuntimeError("Solver has no backbone; construct it with Solver(..., model=...).")
+
+        self._submap_size = submap_size
+        self._overlap = overlapping_window_size
+        self._target_size = submap_size + overlapping_window_size
+        self._max_loops = max_loops
+        self._min_disparity = min_disparity
+        self._keyframe_dir = keyframe_dir
+        self._vis_map = vis_map
+        self._vis_flow = vis_flow
+        self._drop_when_full = drop_when_full
+
+        os.makedirs(keyframe_dir, exist_ok=True)
+
+        self._gpu_q = queue.Queue(maxsize=gpu_queue_depth)
+        self._backend_q = queue.Queue(maxsize=backend_queue_depth)
+        self._running = True
+
+        self._gpu_thread = threading.Thread(target=self._gpu_worker, name="dvlt-gpu", daemon=True)
+        self._backend_thread = threading.Thread(target=self._backend_worker, name="dvlt-backend", daemon=True)
+        self._gpu_thread.start()
+        self._backend_thread.start()
+        print(f"[Solver] Pipeline started (submap_size={submap_size}, overlap={overlapping_window_size}).")
+
+    def track(self, image, timestamp: float = None):
+        """Feed one frame. Returns the latest world pose, or None before the first submap.
+
+        Cheap: optical-flow keyframe gating and a disk write, nothing else. All
+        reconstruction happens on the worker threads.
+        """
+        if not self._running:
+            raise RuntimeError("Call start() before track().")
+
+        self._frame_count += 1
+
+        if self.flow_tracker.compute_disparity(image, self._min_disparity, self._vis_flow):
+            # Submap.set_frame_ids parses a number out of the filename, so the
+            # timestamp has to survive in the name for the pose logs to line up
+            # with ground truth.
+            name = f"{timestamp:.6f}.png" if timestamp is not None else f"frame_{self._keyframe_count:06d}.png"
+            path = os.path.join(self._keyframe_dir, name)
+            cv2.imwrite(path, image)
+            self._keyframe_count += 1
+            self._pending_keyframes.append(path)
+
+        if len(self._pending_keyframes) >= self._target_size:
+            self._submit(self._pending_keyframes)
+            self._pending_keyframes = self._pending_keyframes[-self._overlap:]
+
+        return self._latest_pose
+
+    def _submit(self, image_names):
+        if not self._drop_when_full:
+            self._gpu_q.put(list(image_names))  # block until there is room
+            self._submaps_submitted += 1
+            return
+        try:
+            self._gpu_q.put_nowait(list(image_names))
+            self._submaps_submitted += 1
+        except queue.Full:
+            self._submaps_dropped += 1
+            print(colored(
+                f"[Solver] GPU queue full, dropped submap "
+                f"({self._submaps_dropped} dropped so far).", "yellow"))
+
+    def _gpu_worker(self):
+        while True:
+            item = self._gpu_q.get()
+            if item is _SHUTDOWN:
+                self._backend_q.put(_SHUTDOWN)
+                return
+            try:
+                work = self._run_backbone(item)
+            except Exception:
+                import traceback
+                print(colored("[Solver] backbone failed, skipping submap:", "red"))
+                traceback.print_exc()
+                continue
+            # Blocking on purpose: a slow backend stalls the GPU worker, which
+            # backs the pressure up to track(), where it is visible as a drop.
+            self._backend_q.put(work)
+
+    def _backend_worker(self):
+        while True:
+            work = self._backend_q.get()
+            if work is _SHUTDOWN:
+                return
+            try:
+                with self.map_lock:
+                    predictions = self._finalize_submap(work, self._max_loops)
+                    self.add_points(predictions)
+                    self.graph.optimize()
+                    loop_closed = len(predictions["detected_loops"]) > 0
+                    latest = self.map.get_latest_submap(ignore_loop_closure_submaps=True)
+                    self._latest_pose = latest.get_all_poses_world(self.graph)[-1]
+                    self._submaps_done += 1
+                if self._vis_map:
+                    with self.map_lock:
+                        if loop_closed:
+                            self.update_all_submap_vis()
+                        else:
+                            self.update_latest_submap_vis()
+            except Exception:
+                import traceback
+                print(colored("[Solver] backend failed on a submap:", "red"))
+                traceback.print_exc()
+
+    def shutdown(self, flush: bool = True):
+        """Stop the pipeline, optionally finishing the partial submap in hand."""
+        if not self._running:
+            return
+        # A tail shorter than the carried-over overlap holds no new frames.
+        if flush and len(self._pending_keyframes) > self._overlap:
+            self._submit(self._pending_keyframes)
+        self._pending_keyframes = []
+        self._running = False
+
+        self._gpu_q.put(_SHUTDOWN)
+        self._gpu_thread.join()
+        self._backend_thread.join()
+        print(f"[Solver] Pipeline stopped ({self._submaps_done} submaps processed, "
+              f"{self._submaps_dropped} dropped).")
+
+    def is_busy(self) -> bool:
+        return self._running and (
+            not self._gpu_q.empty() or not self._backend_q.empty()
+            or self._submaps_done < self._submaps_submitted)
+
+    def get_stats(self) -> dict:
+        return {
+            "frames": self._frame_count,
+            "keyframes": self._keyframe_count,
+            "pending": len(self._pending_keyframes),
+            "target_size": getattr(self, "_target_size", None),
+            "submitted": self._submaps_submitted,
+            "done": self._submaps_done,
+            "dropped": self._submaps_dropped,
+            "busy": self.is_busy(),
+        }
+
+    def get_latest_pose(self):
+        """Latest world pose as a 4x4 SE(3), or None before the first submap lands.
+
+        Cached by the backend rather than recomputed, so calling this at camera
+        rate costs nothing.
+        """
+        return self._latest_pose

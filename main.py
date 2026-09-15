@@ -3,21 +3,16 @@ import glob
 import time
 import argparse
 
-import numpy as np
 import torch
 from torchvision.transforms.functional import to_pil_image
 from tqdm.auto import tqdm
 import cv2
-import matplotlib.pyplot as plt
-from termcolor import colored
 
 import vggt_slam.slam_utils as utils
+from vggt_slam.backbone import build_backbone
 from vggt_slam.solver import Solver
-from vggt_slam.submap import Submap
 
-from vggt.models.vggt import VGGT
-
-parser = argparse.ArgumentParser(description="VGGT-SLAM demo")
+parser = argparse.ArgumentParser(description="SLAM demo (DVLT or VGGT backbone)")
 parser.add_argument("--image_folder", type=str, default="examples/kitchen/images/", help="Path to folder containing images")
 parser.add_argument("--vis_map", action="store_true", help="Visualize point cloud in viser as it is being build, otherwise only show the final map")
 parser.add_argument("--vis_imgs", action="store_true", help="Show camera images in the viser frustums. By default only the frustums are shown (faster visualization)")
@@ -77,31 +72,14 @@ def main():
         clip_model, clip_preprocess = None, None
         clip_tokenizer = None
 
-    if args.backbone == "dvlt":
-        from vggt_slam.dvlt_backbone import DVLTBackbone
-
-        model = DVLTBackbone(
-            checkpoint=args.dvlt_checkpoint,
-            inference_steps=args.dvlt_k,
-            device=device,
-            lc_verify=args.lc_verify,
-            lc_attn_step=args.lc_attn_step,
-        )
-        print(f"Using Deja View (DVLT) backbone: K={model.k}, lc_verify={args.lc_verify}")
-        if args.lc_verify == "bypass":
-            print(colored(
-                "lc_verify=bypass: every retrieved loop closure is accepted without "
-                "attention verification. Not a like-for-like comparison with stock VGGT-SLAM.",
-                "yellow",
-            ))
-    else:
-        model = VGGT()
-        _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
-        model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
-        model = model.to(torch.bfloat16)  # use half precision
-
-    model.eval()
-    model = model.to(device)
+    model = build_backbone(
+        backbone=args.backbone,
+        device=device,
+        dvlt_checkpoint=args.dvlt_checkpoint,
+        dvlt_k=args.dvlt_k,
+        lc_verify=args.lc_verify,
+        lc_attn_step=args.lc_attn_step,
+    )
 
     # Single source of truth for every later log line that names the backbone.
     backbone = utils.backbone_name(model)
